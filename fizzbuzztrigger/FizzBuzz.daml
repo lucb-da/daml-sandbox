@@ -62,6 +62,9 @@ template Classifier
     signatory classifier
     observer manager
 
+    key (classifier, manager): (Party, Party)
+    maintainer key._1
+
 template Classify
   with
     value: Value
@@ -159,16 +162,6 @@ createClassifyRule party acs _time commandsInFlight () = do
       dedupExercise v._1 (CreateClassifys (map (.classifier) classifiers))
     )
 
-  -- let ps : [(ContractId Value, Party)] = concatMap (\ (v) -> map (\ (c) -> (v._1, c.classifier)) classifiers) valuesToProcess
-
-  -- forA ps (\ (p) -> dedupExercise p._1 (CreateClassify p._2))
-
-  -- forA values (\ (v) ->
-  --   forA classifiers (\ (c) -> 
-  --     dedupExercise v._1 CreateClassify c
-  --   )
-  -- )
-
   pure()
 
 createResultFizzTrigger : Trigger ()
@@ -191,8 +184,6 @@ createResultBuzzTrigger = Trigger
   , heartbeat = None
   }
 
--- MAYBE: autoregistering of Fizz and Buzz as classifiers ?
-
 createResultRule : Int -> Text -> Party -> ACS -> Time -> Map CommandId [Command] -> () -> TriggerA ()
 createResultRule divisor text party acs _time commandsInFlight () = do
   debug "------"
@@ -204,8 +195,9 @@ createResultRule divisor text party acs _time commandsInFlight () = do
   let valuesFromClassify : [Value] =  map (._2.value) classifies
 
 
-  forA classifies (\ (c) ->
-      dedupExercise c._1 (CreateResult (if (c._2.value.value % divisor == 0) then (Some text) else None))
+  forA classifies (\ (c) -> do
+      let res = if (c._2.value.value % divisor == 0) then (Some text) else None
+      dedupExercise c._1 (CreateResult res)
     )
 
   pure()
@@ -238,7 +230,7 @@ createFizzBuzzValueRule party acs _time commandsInFlight () = do
   -- keep only result for which there is no more requests on the same value
   let fullResults = filter (\ (r) -> notElem (r._2.classify.value) valuesFromClassify) classifyResults
 
-  -- group my base value
+  -- group by base value
   let results = groupOn (\ (r)-> r._2.classify.value) fullResults
 
   forA results (\ (r) ->
@@ -247,42 +239,6 @@ createFizzBuzzValueRule party acs _time commandsInFlight () = do
 
   pure()
 
--- SOME TEST using commandsInFlight
-
-  -- let v = concatMap (\ x -> x._2) (toList commandsInFlight)
-
-
-  -- debug (map (\ x -> x._1) (toList commandsInFlight))
-  -- debug (DA.List.length v)
-
-  -- let cc = map ( \ x -> toTextCommand x) v
-
-  -- debug cc
-
-  -- let first: Command = (head (head v)._2)
-
-  -- let cc = toCreateCommand first
-
-  -- debug cc
-
-  -- let a : Optional Int = Some 2
-
-  -- let b = case a of 
-  --   2 -> "deux"
-  
-  -- let b = case a of
-  --   None -> "Box is empty"
-  --   Some val -> "The content of the box is " <> show val
-
-  -- let t = case first of
-  --   CreateCommand i j -> "create"
-  --   _ -> "other"  
-
-  -- dedupCreate Value with
-  --   value = 1
-  --   creator = party
-  --   manager = party 
-
 base_test = scenario do
   creator <- getParty "Creator"
   manager <- getParty "Manager"
@@ -290,20 +246,30 @@ base_test = scenario do
   fizz <- getParty "Fizz"
   buzz <- getParty "Buzz"
 
+  fizzClassifier <- submit fizz do
+    create Classifier with
+      classifier = fizz
+      manager = manager
+
+  buzzClassifier <- submit buzz do
+    create Classifier with
+      classifier = buzz
+      manager = manager
+
   valueCid <- submit creator do
     create Value with
       value = 15
       creator
       manager
 
-  classifysCid <- submit manager do
+  classifyFizzCid :: classifyBuzzCid ::[] <- submit manager do
     exercise valueCid CreateClassifys with classifiers=[fizz,buzz]
 
   resultFizzCid <- submit fizz do
-    exercise (head classifysCid) CreateResult with result= Some "Fizz"
+    exercise classifyFizzCid CreateResult with result= Some "Fizz"
 
   resultBuzzCid <- submit buzz do
-     exercise (last classifysCid) CreateResult with result= Some "Buzz"
+     exercise classifyBuzzCid CreateResult with result= Some "Buzz"
 
   submit manager do
     exercise valueCid CreateFizzBuzzValue with results = [resultFizzCid, resultBuzzCid]
