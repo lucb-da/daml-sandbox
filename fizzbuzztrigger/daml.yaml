@@ -1,0 +1,17 @@
+sdk-version: 1.4.0
+name: fizzbuzz-trigger
+source: .
+parties:
+  - Creator
+  - Manager
+  - Fizz
+  - Buzz
+version: 0.0.1
+# trigger-dependencies-begin
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-trigger
+# trigger-dependencies-end
+sandbox-options:
+  - --wall-clock-time

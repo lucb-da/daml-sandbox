@@ -1,0 +1,314 @@
+module FizzBuzz where
+
+import DA.List
+import DA.Optional
+import DA.Text (implode)
+
+import DA.Next.Map (Map)
+
+import Daml.Trigger
+
+data ValueKey = ValueKey
+  with
+    value: Int
+    creator: Party
+  deriving (Eq, Show)
+
+
+template Value
+  with
+    value: Int
+    creator: Party
+    manager: Party
+  where
+    signatory creator
+    observer manager
+
+    key ValueKey value creator: ValueKey
+    maintainer key.creator
+
+    nonconsuming choice CreateClassifys : [ContractId Classify]
+      with classifiers : [Party]
+      controller manager
+        do
+          -- generate a Classify for each classifier
+          forA classifiers (\ (c) ->
+              create Classify with 
+                value = this
+                classifier = c
+            )
+    
+    nonconsuming choice CreateFizzBuzzValue : ContractId FizzBuzzValue
+      with
+        results: [ContractId ClassifyResult]
+      controller manager
+        do
+          -- compute result value
+          r <- mapA ( \ (c: ContractId ClassifyResult) -> fetch c) results
+          let x = mapOptional (\ x -> x.result) r
+          let res: Text = if ((length x) == 0) then (show value) else (implode x)
+          -- archive used ClassifiResult
+          forA results (\ (r: ContractId ClassifyResult) -> exercise r Done)
+          -- create new FizzBuzzValue
+          create FizzBuzzValue with 
+            value = this
+            fizzbuzz = res
+
+template Classifier
+  with
+    classifier: Party
+    manager: Party
+  where
+    signatory classifier
+    observer manager
+
+template Classify
+  with
+    value: Value
+    classifier: Party
+  where
+    signatory value.manager
+    observer classifier
+
+    choice CreateResult : ContractId ClassifyResult
+      with result: Optional Text 
+      controller classifier
+        do
+          -- Generate the ClassifyResult
+          create ClassifyResult with
+            classify = this
+            result
+
+template ClassifyResult
+  with
+    classify: Classify
+    result: Optional Text
+  where
+    signatory classify.classifier
+    observer classify.value.manager
+
+    choice Done: ()
+      controller classify.value.manager
+        do
+          -- Archive the ClassifyResult
+          return ()
+
+template FizzBuzzValue
+  with
+    value: Value
+    fizzbuzz: Text
+  where
+    signatory value.manager
+    observer value.creator
+    
+
+-- for all trigger: should get back to a good state during initialize
+
+createClassifyTrigger : Trigger ()
+createClassifyTrigger = Trigger
+  { initialize = \_acs -> ()
+  , updateState = \_acs _message () -> ()
+  , rule = createClassifyRule
+  -- , registeredTemplates = RegisteredTemplates [registeredTemplate @Value]
+  , registeredTemplates = AllInDar
+  , heartbeat = None
+  }
+
+createClassifyRule : Party -> ACS -> Time -> Map CommandId [Command] -> () -> TriggerA ()
+createClassifyRule party acs _time commandsInFlight () = do
+
+  debug "-------"
+
+  -- list classifiers
+  let classifiers : [Classifier] = map (._2) (getContracts @Classifier acs)
+  debug ("classifiers")
+  debug (length classifiers)
+
+  -- list values
+  let values : [(ContractId Value, Value)] = getContracts @Value acs
+  debug ("values")
+  debug (length values)
+
+  -- list classify requests
+  let classifies : [(ContractId Classify, Classify)] = getContracts @Classify acs
+  debug ("classifies")
+  debug (length classifies)
+  let valuesFromClassify : [Value] =  map (._2.value) classifies
+
+  -- list classify results
+  let classifyResults : [(ContractId ClassifyResult, ClassifyResult)] = getContracts @ClassifyResult acs
+  debug ("classify results")
+  debug (length classifyResults)
+  let valuesFromClassifyResult : [Value] =  map (._2.classify.value) classifyResults
+
+  -- list fizzbuzz values
+  let fizzbuzzValues : [(ContractId FizzBuzzValue, FizzBuzzValue)] = getContracts @FizzBuzzValue acs
+  debug ("fizzbuzz values")
+  debug (length fizzbuzzValues)
+  let valuesFromFizzbuzz : [Value] =  map (._2.value) fizzbuzzValues
+
+  let allAlreadyProcessedValues : [Value] = dedupBy (\ (a) (b) -> if a == b then EQ else LT) valuesFromClassify <> valuesFromClassifyResult <> valuesFromFizzbuzz
+  debug ("already processed values")
+  debug (length allAlreadyProcessedValues)
+
+  let valuesToProcess : [(ContractId Value, Value)] = filter (\ (vt) -> notElem vt._2 allAlreadyProcessedValues) values
+  debug ("values to Process")
+  debug (length valuesToProcess)
+
+  forA valuesToProcess (\ (v) ->
+      dedupExercise v._1 (CreateClassifys (map (.classifier) classifiers))
+    )
+
+  -- let ps : [(ContractId Value, Party)] = concatMap (\ (v) -> map (\ (c) -> (v._1, c.classifier)) classifiers) valuesToProcess
+
+  -- forA ps (\ (p) -> dedupExercise p._1 (CreateClassify p._2))
+
+  -- forA values (\ (v) ->
+  --   forA classifiers (\ (c) -> 
+  --     dedupExercise v._1 CreateClassify c
+  --   )
+  -- )
+
+  pure()
+
+createResultFizzTrigger : Trigger ()
+createResultFizzTrigger = Trigger
+  { initialize = \_acs -> ()
+  , updateState = \_acs _message () -> ()
+  , rule = createResultRule 3 "Fizz"
+  -- , registeredTemplates = RegisteredTemplates [registeredTemplate @Classify]
+  , registeredTemplates = AllInDar
+  , heartbeat = None
+  }
+
+createResultBuzzTrigger : Trigger ()
+createResultBuzzTrigger = Trigger
+  { initialize = \_acs -> ()
+  , updateState = \_acs _message () -> ()
+  , rule = createResultRule 5 "Buzz"
+  -- , registeredTemplates = RegisteredTemplates [registeredTemplate @Classify]
+  , registeredTemplates = AllInDar
+  , heartbeat = None
+  }
+
+-- MAYBE: autoregistering of Fizz and Buzz as classifiers ?
+
+createResultRule : Int -> Text -> Party -> ACS -> Time -> Map CommandId [Command] -> () -> TriggerA ()
+createResultRule divisor text party acs _time commandsInFlight () = do
+  debug "------"
+
+  -- list classify requests
+  let classifies : [(ContractId Classify, Classify)] = getContracts @Classify acs
+  debug ("classifies")
+  debug (length classifies)
+  let valuesFromClassify : [Value] =  map (._2.value) classifies
+
+
+  forA classifies (\ (c) ->
+      dedupExercise c._1 (CreateResult (if (c._2.value.value % divisor == 0) then (Some text) else None))
+    )
+
+  pure()
+
+createFizzBuzzValueTrigger : Trigger ()
+createFizzBuzzValueTrigger = Trigger
+  { initialize = \_acs -> ()
+  , updateState = \_acs _message () -> ()
+  , rule = createFizzBuzzValueRule
+  -- , registeredTemplates = RegisteredTemplates [registeredTemplate @Value]
+  , registeredTemplates = AllInDar
+  , heartbeat = None
+  }
+
+createFizzBuzzValueRule : Party -> ACS -> Time -> Map CommandId [Command] -> () -> TriggerA ()
+createFizzBuzzValueRule party acs _time commandsInFlight () = do
+
+  -- list classify requests
+  let classifies : [(ContractId Classify, Classify)] = getContracts @Classify acs
+  debug ("classifies")
+  debug (length classifies)
+  let valuesFromClassify : [Value] =  map (._2.value) classifies
+
+  -- list classify results
+  let classifyResults : [(ContractId ClassifyResult, ClassifyResult)] = getContracts @ClassifyResult acs
+  debug ("classify results")
+  debug (length classifyResults)
+  -- let valuesFromClassifyResult : [Value] =  map (._2.classify.value) classifyResults
+
+  -- keep only result for which there is no more requests on the same value
+  let fullResults = filter (\ (r) -> notElem (r._2.classify.value) valuesFromClassify) classifyResults
+
+  -- group my base value
+  let results = groupOn (\ (r)-> r._2.classify.value) fullResults
+
+  forA results (\ (r) ->
+      dedupExerciseByKey @Value (key (head r)._2.classify.value) CreateFizzBuzzValue with results = (map (._1) r)
+    )
+
+  pure()
+
+-- SOME TEST using commandsInFlight
+
+  -- let v = concatMap (\ x -> x._2) (toList commandsInFlight)
+
+
+  -- debug (map (\ x -> x._1) (toList commandsInFlight))
+  -- debug (DA.List.length v)
+
+  -- let cc = map ( \ x -> toTextCommand x) v
+
+  -- debug cc
+
+  -- let first: Command = (head (head v)._2)
+
+  -- let cc = toCreateCommand first
+
+  -- debug cc
+
+  -- let a : Optional Int = Some 2
+
+  -- let b = case a of 
+  --   2 -> "deux"
+  
+  -- let b = case a of
+  --   None -> "Box is empty"
+  --   Some val -> "The content of the box is " <> show val
+
+  -- let t = case first of
+  --   CreateCommand i j -> "create"
+  --   _ -> "other"  
+
+  -- dedupCreate Value with
+  --   value = 1
+  --   creator = party
+  --   manager = party 
+
+base_test = scenario do
+  creator <- getParty "Creator"
+  manager <- getParty "Manager"
+
+  fizz <- getParty "Fizz"
+  buzz <- getParty "Buzz"
+
+  valueCid <- submit creator do
+    create Value with
+      value = 15
+      creator
+      manager
+
+  classifysCid <- submit manager do
+    exercise valueCid CreateClassifys with classifiers=[fizz,buzz]
+
+  resultFizzCid <- submit fizz do
+    exercise (head classifysCid) CreateResult with result= Some "Fizz"
+
+  resultBuzzCid <- submit buzz do
+     exercise (last classifysCid) CreateResult with result= Some "Buzz"
+
+  submit manager do
+    exercise valueCid CreateFizzBuzzValue with results = [resultFizzCid, resultBuzzCid]
+
+  return 4
+
+
+  
